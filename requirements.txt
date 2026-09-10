@@ -2,3 +2,4 @@ google-genai
 groq
 python-telegram-bot[webhooks]
 python-dotenv
+openai
