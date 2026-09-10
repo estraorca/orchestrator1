@@ -1,0 +1,4 @@
+google-genai
+groq
+python-telegram-bot
+python-dotenv
