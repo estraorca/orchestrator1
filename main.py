@@ -25,6 +25,9 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 MODELLO_GEMINI = "gemini-3.6-flash"
 MODELLO_GROQ = "openai/gpt-oss-120b"
 
+# Telegram ha un limite di 4096 caratteri per messaggio
+MAX_LEN = 4000
+
 # ========================
 # 2. Funzioni chiamate AI
 # ========================
@@ -70,6 +73,7 @@ async def orchestratore(problema):
     gemini = risposte_valide[0]
     groq = risposte_valide[1]
 
+    # Confronto per similarità (parole in comune)
     parole_gemini = set(gemini["testo"].lower().split())
     parole_groq = set(groq["testo"].lower().split())
     if parole_gemini and parole_groq:
@@ -77,6 +81,7 @@ async def orchestratore(problema):
         if similarita >= 0.7:
             return f"[Gemini + Groq concordi]\n\n{gemini['testo']}"
 
+    # Risposte divergenti: chiedo a Gemini di sintetizzarle
     prompt_sintesi = f"""Ho posto questa domanda: "{problema}"
 
 Due modelli AI hanno risposto così:
@@ -95,7 +100,22 @@ Scrivi un'unica risposta finale che integri il meglio di entrambe, risolva event
     return f"[Sintesi di Gemini + Groq]\n\n{sintesi['testo']}"
 
 # ========================
-# 4. Gestione Bot Telegram
+# 4. Funzione di invio con split
+# ========================
+
+async def invia_messaggio_lungo(update: Update, testo: str):
+    """Invia un messaggio, spezzandolo se supera il limite di Telegram."""
+    if len(testo) <= MAX_LEN:
+        await update.message.reply_text(testo)
+        return
+
+    # Spezza il testo in blocchi da MAX_LEN caratteri
+    for i in range(0, len(testo), MAX_LEN):
+        chunk = testo[i:i + MAX_LEN]
+        await update.message.reply_text(chunk)
+
+# ========================
+# 5. Gestione Bot Telegram
 # ========================
 
 logging.basicConfig(level=logging.INFO)
@@ -111,12 +131,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Sto consultando Gemini e Groq...")
     try:
         risposta = await orchestratore(user_message)
-        await update.message.reply_text(risposta)
+        await invia_messaggio_lungo(update, risposta)
     except Exception as e:
         await update.message.reply_text(f"❌ Errore: {str(e)}")
 
 # ========================
-# 5. Avvio (Webhook per Render, Polling in locale)
+# 6. Avvio (Webhook per Render, Polling in locale)
 # ========================
 
 def main():
