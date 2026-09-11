@@ -34,7 +34,7 @@ else:
 
 MODELLO_GEMINI = "gemini-3.6-flash"
 MODELLO_GROQ = "openai/gpt-oss-120b"
-MODELLO_OPENROUTER = "deepseek/deepseek-v4-flash:free"
+MODELLO_OPENROUTER = "openrouter/free"
 
 MAX_LEN = 4000
 MAX_HISTORY = 10  # Ultimi 5 scambi (utente + bot)
