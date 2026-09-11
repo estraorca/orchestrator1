@@ -67,10 +67,11 @@ async def reset_cronologia(chat_id: int):
     await redis_client.delete(chiave_cronologia(chat_id))
 
 # ========================
-# 3. Funzioni chiamate AI
+# 3. Funzioni chiamate AI (TUTTI con contesto)
 # ========================
 
 async def chiama_gemini(chat_id: int, prompt_utente: str):
+    """Gemini riceve la cronologia in formato testuale."""
     try:
         history = await recupera_cronologia(chat_id)
         contesto = ""
@@ -91,22 +92,30 @@ async def chiama_gemini(chat_id: int, prompt_utente: str):
         return {"modello": "Gemini", "errore": str(e)}
 
 async def chiama_groq(chat_id: int, prompt_utente: str):
+    """Groq riceve la cronologia in formato messages."""
     try:
+        messages = await recupera_cronologia(chat_id)
+        messages.append({"role": "user", "content": prompt_utente})
+
         response = groq_client.chat.completions.create(
             model=MODELLO_GROQ,
-            messages=[{"role": "user", "content": prompt_utente}]
+            messages=messages
         )
         return {"modello": "Groq", "testo": response.choices[0].message.content}
     except Exception as e:
         return {"modello": "Groq", "errore": str(e)}
 
 async def chiama_openrouter(chat_id: int, prompt_utente: str):
+    """OpenRouter riceve la cronologia in formato messages."""
     if openrouter_client is None:
         return {"modello": "OpenRouter", "errore": "OpenRouter non configurato"}
     try:
+        messages = await recupera_cronologia(chat_id)
+        messages.append({"role": "user", "content": prompt_utente})
+
         response = openrouter_client.chat.completions.create(
             model=MODELLO_OPENROUTER,
-            messages=[{"role": "user", "content": prompt_utente}]
+            messages=messages
         )
         return {"modello": "OpenRouter", "testo": response.choices[0].message.content}
     except Exception as e:
@@ -142,7 +151,7 @@ async def orchestratore(chat_id: int, problema: str):
                 if sim >= 0.7:
                     return f"[{risposte_valide[i]['modello']} + {risposte_valide[j]['modello']} concordi]\n\n{risposte_valide[i]['testo']}"
 
-    # Sintesi con Gemini (con contesto, ma senza commenti meta)
+    # Sintesi con Gemini
     blocchi = "\n\n".join([
         f"Risposta {idx + 1} ({r['modello']}):\n{r['testo']}"
         for idx, r in enumerate(risposte_valide)
