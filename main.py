@@ -38,7 +38,7 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 MODELLO_GEMINI = "gemini-3.6-flash"
 MODELLO_GROQ = "openai/gpt-oss-120b"
-MODELLO_OPENROUTER = "openrouter/free"
+MODELLO_OPENROUTER = "nvidia/nemotron-3-super-120b-a12b:free"
 
 MAX_LEN = 4000
 MAX_HISTORY = 10
@@ -125,6 +125,17 @@ async def chiama_openrouter(chat_id: int, prompt_utente: str):
 # 4. L'Orchestratore
 # ========================
 
+def risposta_rotta(testo: str) -> bool:
+    """Rileva risposte palesemente rotte o inutili."""
+    if len(testo.strip()) < 20:
+        return True
+    basso = testo.lower()
+    if "user safety" in basso:
+        return True
+    if basso.strip() in ("safe", "ok", "n/a"):
+        return True
+    return False
+
 async def orchestratore(chat_id: int, problema: str):
     risultati = await asyncio.gather(
         chiama_gemini(chat_id, problema),
@@ -133,9 +144,12 @@ async def orchestratore(chat_id: int, problema: str):
     )
     risposte_valide = [r for r in risultati if "errore" not in r]
 
+    # Filtra risposte rotte
+    risposte_valide = [r for r in risposte_valide if not risposta_rotta(r["testo"])]
+
     if not risposte_valide:
-        errori = "\n".join([f"❌ {r['modello']}: {r['errore'][:100]}" for r in risultati])
-        return f"⚠️ Tutti i modelli hanno fallito.\n\n{errori}"
+        errori = "\n".join([f"❌ {r['modello']}: {r['errore'][:100]}" for r in risultati if "errore" in r])
+        return f"⚠️ Nessun modello ha dato una risposta valida.\n\n{errori}"
 
     if len(risposte_valide) == 1:
         r = risposte_valide[0]
@@ -151,14 +165,14 @@ async def orchestratore(chat_id: int, problema: str):
                 if sim >= 0.7:
                     return f"[{risposte_valide[i]['modello']} + {risposte_valide[j]['modello']} concordi]\n\n{risposte_valide[i]['testo']}"
 
-    # Sintesi con Gemini
+    # Sintesi con Groq (gratuito, veloce, senza problemi di quota)
     blocchi = "\n\n".join([
         f"Risposta {idx + 1} ({r['modello']}):\n{r['testo']}"
         for idx, r in enumerate(risposte_valide)
     ])
     prompt_sintesi = f"""Domanda dell'utente: "{problema}"
 
-Tre assistenti AI hanno proposto queste risposte:
+{len(risposte_valide)} assistenti AI hanno proposto queste risposte:
 
 {blocchi}
 
@@ -173,8 +187,8 @@ REGOLE:
 
 Rispondi direttamente con la sintesi, senza preamboli."""
 
-    sintesi = await chiama_gemini(chat_id, prompt_sintesi)
-    if "errore" in sintesi:
+    sintesi = await chiama_groq(chat_id, prompt_sintesi)
+    if "errore" in sintesi or risposta_rotta(sintesi.get("testo", "")):
         return "⚖️ Risposte divergenti:\n\n" + "\n\n".join([
             f"🔷 [{r['modello']}]\n{r['testo']}" for r in risposte_valide
         ])
