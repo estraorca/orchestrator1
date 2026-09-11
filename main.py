@@ -1,12 +1,13 @@
 import asyncio
 import os
-from dotenv import load_dotenv
+import json
 import logging
 
+from dotenv import load_dotenv
 from google import genai
-from google.genai import types as genai_types
 from groq import Groq
 from openai import OpenAI
+import redis.asyncio as redis
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -20,6 +21,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+REDIS_URL = os.getenv("REDIS_URL")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -32,57 +34,63 @@ if OPENROUTER_API_KEY:
 else:
     openrouter_client = None
 
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
 MODELLO_GEMINI = "gemini-3.6-flash"
 MODELLO_GROQ = "openai/gpt-oss-120b"
 MODELLO_OPENROUTER = "openrouter/free"
 
 MAX_LEN = 4000
-MAX_HISTORY = 10  # Ultimi 5 scambi (utente + bot)
+MAX_HISTORY = 10
+TTL_CRONOLOGIA = 604800
 
 # ========================
-# 2. Memoria conversazionale (in RAM)
+# 2. Memoria persistente su Redis
 # ========================
 
-# Dizionario: chat_id -> lista di {"role": "user"/"assistant", "content": "..."}
-cronologia: dict[int, list] = {}
+def chiave_cronologia(chat_id: int) -> str:
+    return f"chat:{chat_id}:history"
 
-def aggiungi_a_cronologia(chat_id: int, ruolo: str, contenuto: str):
-    if chat_id not in cronologia:
-        cronologia[chat_id] = []
-    cronologia[chat_id].append({"role": ruolo, "content": contenuto})
-    if len(cronologia[chat_id]) > MAX_HISTORY:
-        cronologia[chat_id] = cronologia[chat_id][-MAX_HISTORY:]
+async def aggiungi_a_cronologia(chat_id: int, ruolo: str, contenuto: str):
+    chiave = chiave_cronologia(chat_id)
+    messaggio = json.dumps({"role": ruolo, "content": contenuto})
+    await redis_client.rpush(chiave, messaggio)
+    await redis_client.ltrim(chiave, -MAX_HISTORY, -1)
+    await redis_client.expire(chiave, TTL_CRONOLOGIA)
 
-def reset_cronologia(chat_id: int):
-    cronologia[chat_id] = []
+async def recupera_cronologia(chat_id: int) -> list:
+    chiave = chiave_cronologia(chat_id)
+    messaggi = await redis_client.lrange(chiave, 0, -1)
+    return [json.loads(m) for m in messaggi]
+
+async def reset_cronologia(chat_id: int):
+    await redis_client.delete(chiave_cronologia(chat_id))
 
 # ========================
 # 3. Funzioni chiamate AI
 # ========================
 
 async def chiama_gemini(chat_id: int, prompt_utente: str):
-    """Gemini riceve TUTTA la cronologia (modello con memoria)."""
     try:
-        history = cronologia.get(chat_id, [])
-        contents = []
-        for msg in history:
-            ruolo = "user" if msg["role"] == "user" else "model"
-            contents.append(
-                genai_types.Content(role=ruolo, parts=[genai_types.Part(text=msg["content"])])
-            )
-        contents.append(
-            genai_types.Content(role="user", parts=[genai_types.Part(text=prompt_utente)])
-        )
+        history = await recupera_cronologia(chat_id)
+        contesto = ""
+        if history:
+            righe = []
+            for msg in history:
+                ruolo = "Utente" if msg["role"] == "user" else "Assistente"
+                righe.append(f"{ruolo}: {msg['content']}")
+            contesto = "Contesto della conversazione:\n" + "\n".join(righe) + "\n\n"
 
+        prompt_completo = f"{contesto}Utente: {prompt_utente}\n\nAssistente:"
         response = await gemini_client.aio.models.generate_content(
-            model=MODELLO_GEMINI, contents=contents
+            model=MODELLO_GEMINI,
+            contents=prompt_completo
         )
         return {"modello": "Gemini", "testo": response.text}
     except Exception as e:
         return {"modello": "Gemini", "errore": str(e)}
 
 async def chiama_groq(chat_id: int, prompt_utente: str):
-    """Groq riceve SOLO la domanda attuale (parere fresco, risparmio token)."""
     try:
         response = groq_client.chat.completions.create(
             model=MODELLO_GROQ,
@@ -93,17 +101,16 @@ async def chiama_groq(chat_id: int, prompt_utente: str):
         return {"modello": "Groq", "errore": str(e)}
 
 async def chiama_openrouter(chat_id: int, prompt_utente: str):
-    """OpenRouter riceve SOLO la domanda attuale (parere fresco)."""
     if openrouter_client is None:
-        return {"modello": "DeepSeek V4", "errore": "OpenRouter non configurato"}
+        return {"modello": "OpenRouter", "errore": "OpenRouter non configurato"}
     try:
         response = openrouter_client.chat.completions.create(
             model=MODELLO_OPENROUTER,
             messages=[{"role": "user", "content": prompt_utente}]
         )
-        return {"modello": "DeepSeek V4", "testo": response.choices[0].message.content}
+        return {"modello": "OpenRouter", "testo": response.choices[0].message.content}
     except Exception as e:
-        return {"modello": "DeepSeek V4", "errore": str(e)}
+        return {"modello": "OpenRouter", "errore": str(e)}
 
 # ========================
 # 4. L'Orchestratore
@@ -125,7 +132,6 @@ async def orchestratore(chat_id: int, problema: str):
         r = risposte_valide[0]
         return f"[{r['modello']}]\n\n{r['testo']}"
 
-    # Se almeno 2 risposte sono simili, restituisci quella
     for i in range(len(risposte_valide)):
         for j in range(i + 1, len(risposte_valide)):
             a = set(risposte_valide[i]["testo"].lower().split())
@@ -135,7 +141,6 @@ async def orchestratore(chat_id: int, problema: str):
                 if sim >= 0.7:
                     return f"[{risposte_valide[i]['modello']} + {risposte_valide[j]['modello']} concordi]\n\n{risposte_valide[i]['testo']}"
 
-    # Divergenza: sintesi con Gemini (con contesto!)
     blocchi = "\n\n".join([
         f"Risposta {idx + 1} ({r['modello']}):\n{r['testo']}"
         for idx, r in enumerate(risposte_valide)
@@ -156,7 +161,7 @@ Scrivi un'unica risposta finale che integri il meglio di tutte, risolva eventual
     return f"[Sintesi di {len(risposte_valide)} modelli]\n\n{sintesi['testo']}"
 
 # ========================
-# 5. Funzione di invio con split
+# 5. Invio messaggi lunghi
 # ========================
 
 async def invia_messaggio_lungo(update: Update, testo: str):
@@ -175,17 +180,17 @@ logging.basicConfig(level=logging.INFO)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    reset_cronologia(chat_id)
+    await reset_cronologia(chat_id)
     await update.message.reply_text(
         "👋 Ciao! Sono il tuo orchestratore AI.\n"
-        "Uso Gemini 3.6, Groq e DeepSeek V4.\n\n"
-        "🧠 Mantengo il contesto della conversazione (ultimi 5 scambi).\n"
+        "Uso Gemini 3.6, Groq e OpenRouter.\n\n"
+        "🧠 Memoria persistente attiva (7 giorni, ultimi 5 scambi).\n"
         "Usa /reset per ricominciare da capo."
     )
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    reset_cronologia(chat_id)
+    await reset_cronologia(chat_id)
     await update.message.reply_text("🧹 Memoria cancellata! Ricominciamo da zero.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,8 +200,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Sto consultando i modelli...")
     try:
         risposta = await orchestratore(chat_id, user_message)
-        aggiungi_a_cronologia(chat_id, "user", user_message)
-        aggiungi_a_cronologia(chat_id, "assistant", risposta)
+        await aggiungi_a_cronologia(chat_id, "user", user_message)
+        await aggiungi_a_cronologia(chat_id, "assistant", risposta)
         await invia_messaggio_lungo(update, risposta)
     except Exception as e:
         await update.message.reply_text(f"❌ Errore: {str(e)}")

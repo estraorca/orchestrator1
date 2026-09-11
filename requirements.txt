@@ -3,3 +3,4 @@ groq
 python-telegram-bot[webhooks]
 python-dotenv
 openai
+redis
