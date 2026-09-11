@@ -132,6 +132,7 @@ async def orchestratore(chat_id: int, problema: str):
         r = risposte_valide[0]
         return f"[{r['modello']}]\n\n{r['testo']}"
 
+    # Confronto per similarità
     for i in range(len(risposte_valide)):
         for j in range(i + 1, len(risposte_valide)):
             a = set(risposte_valide[i]["testo"].lower().split())
@@ -141,17 +142,27 @@ async def orchestratore(chat_id: int, problema: str):
                 if sim >= 0.7:
                     return f"[{risposte_valide[i]['modello']} + {risposte_valide[j]['modello']} concordi]\n\n{risposte_valide[i]['testo']}"
 
+    # Sintesi con Gemini (con contesto, ma senza commenti meta)
     blocchi = "\n\n".join([
         f"Risposta {idx + 1} ({r['modello']}):\n{r['testo']}"
         for idx, r in enumerate(risposte_valide)
     ])
-    prompt_sintesi = f"""Ho posto questa domanda: "{problema}"
+    prompt_sintesi = f"""Domanda dell'utente: "{problema}"
 
-{len(risposte_valide)} modelli AI hanno risposto così:
+Tre assistenti AI hanno proposto queste risposte:
 
 {blocchi}
 
-Scrivi un'unica risposta finale che integri il meglio di tutte, risolva eventuali contraddizioni e sia chiara e completa, tenendo conto del contesto della conversazione. Rispondi direttamente con la sintesi."""
+Il tuo compito: scrivi UNA SOLA risposta finale per l'utente, in modo diretto e naturale.
+
+REGOLE:
+- NON menzionare i nomi dei modelli, NON spiegare chi ha sbagliato, NON fare commenti meta.
+- Rispondi come se fossi un unico assistente che ha semplicemente la risposta.
+- Se le risposte sono contraddittorie, scegli quella più corretta e ignora le altre.
+- Se una risposta è chiaramente sbagliata, ignorala silenziosamente.
+- Vai dritto al punto.
+
+Rispondi direttamente con la sintesi, senza preamboli."""
 
     sintesi = await chiama_gemini(chat_id, prompt_sintesi)
     if "errore" in sintesi:
