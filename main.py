@@ -87,8 +87,10 @@ async def chiama_gemini(chat_id: int, prompt_utente: str):
             model=MODELLO_GEMINI,
             contents=prompt_completo
         )
+        logging.info(f"[GEMINI OK] Risposta: {response.text[:100]}")
         return {"modello": "Gemini", "testo": response.text}
     except Exception as e:
+        logging.error(f"[GEMINI ERRORE] {type(e).__name__}: {str(e)[:200]}")
         return {"modello": "Gemini", "errore": str(e)}
 
 async def chiama_groq(chat_id: int, prompt_utente: str):
@@ -103,6 +105,7 @@ async def chiama_groq(chat_id: int, prompt_utente: str):
         )
         return {"modello": "Groq", "testo": response.choices[0].message.content}
     except Exception as e:
+        logging.error(f"[GROQ ERRORE] {type(e).__name__}: {str(e)[:200]}")
         return {"modello": "Groq", "errore": str(e)}
 
 async def chiama_openrouter(chat_id: int, prompt_utente: str):
@@ -119,6 +122,7 @@ async def chiama_openrouter(chat_id: int, prompt_utente: str):
         )
         return {"modello": "OpenRouter", "testo": response.choices[0].message.content}
     except Exception as e:
+        logging.error(f"[OPENROUTER ERRORE] {type(e).__name__}: {str(e)[:200]}")
         return {"modello": "OpenRouter", "errore": str(e)}
 
 # ========================
@@ -127,7 +131,7 @@ async def chiama_openrouter(chat_id: int, prompt_utente: str):
 
 def risposta_rotta(testo: str) -> bool:
     """Rileva risposte palesemente rotte o inutili."""
-    if len(testo.strip()) < 20:
+    if not testo or len(testo.strip()) < 5:
         return True
     basso = testo.lower()
     if "user safety" in basso:
@@ -142,9 +146,14 @@ async def orchestratore(chat_id: int, problema: str):
         chiama_groq(chat_id, problema),
         chiama_openrouter(chat_id, problema)
     )
-    risposte_valide = [r for r in risultati if "errore" not in r]
 
-    # Filtra risposte rotte
+    # LOG DI DEBUG: mostra cosa ha risposto ogni modello
+    for r in risultati:
+        stato = "OK" if "errore" not in r else f"ERRORE: {r['errore'][:80]}"
+        testo_breve = r.get("testo", "")[:80].replace("\n", " ")
+        logging.info(f"[DEBUG] {r['modello']}: {stato} | Testo: {testo_breve}")
+
+    risposte_valide = [r for r in risultati if "errore" not in r]
     risposte_valide = [r for r in risposte_valide if not risposta_rotta(r["testo"])]
 
     if not risposte_valide:
@@ -165,7 +174,7 @@ async def orchestratore(chat_id: int, problema: str):
                 if sim >= 0.7:
                     return f"[{risposte_valide[i]['modello']} + {risposte_valide[j]['modello']} concordi]\n\n{risposte_valide[i]['testo']}"
 
-    # Sintesi con Groq (gratuito, veloce, senza problemi di quota)
+    # Sintesi con Groq
     blocchi = "\n\n".join([
         f"Risposta {idx + 1} ({r['modello']}):\n{r['testo']}"
         for idx, r in enumerate(risposte_valide)
